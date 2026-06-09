@@ -1,14 +1,24 @@
+function Invoke-Git {
+    $Command = "git $($Args -join ' ')"
+
+    git @Args
+
+    if ($LASTEXITCODE -ne 0) {
+        throw "Git command failed with exit code $LASTEXITCODE: $Command"
+    }
+}
+
 Write-Host "=== Updating main project ===" -ForegroundColor Cyan
-git pull --rebase origin main
+Invoke-Git pull --rebase origin main
 
 Write-Host "=== Initializing submodules ===" -ForegroundColor Cyan
-git submodule update --init --recursive
+Invoke-Git submodule update --init --recursive
 
 Write-Host "=== Updating official hhru/api submodule ===" -ForegroundColor Cyan
-git submodule update --remote --checkout external/hhru-api
+Invoke-Git submodule update --remote --checkout external/hhru-api
 
 Write-Host "=== Git status ===" -ForegroundColor Cyan
-git status
+Invoke-Git status
 
 Write-Host ""
 Write-Host "Update finished." -ForegroundColor Green
