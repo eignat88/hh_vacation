@@ -1,7 +1,10 @@
+import csv
 import os
+import tempfile
 import unittest
 from datetime import datetime, timezone
 from email.utils import format_datetime
+from pathlib import Path
 from unittest.mock import patch
 
 import requests
@@ -41,6 +44,8 @@ class DummySession:
 
     def get(self, *_args, **_kwargs):
         self.calls += 1
+        if isinstance(self.response, list):
+            return self.response[min(self.calls - 1, len(self.response) - 1)]
         return self.response
 
 
@@ -161,15 +166,108 @@ class HeadHunterRequestTests(unittest.TestCase):
                 self.assertIn(f"request_id: rid-{status_code}", log_output)
                 self.assertIn("User-Agent", log_output)
 
-    def test_request_json_retries_server_errors(self):
+    def test_request_json_retries_server_errors_without_sleep_after_last_attempt(self):
         response = DummyResponse(status_code=503, payload={"errors": [{"type": "service_unavailable"}]})
         session = DummySession(response)
 
-        with patch.object(exporter.time, "sleep"):
+        with patch.object(exporter.time, "sleep") as sleep_mock:
             with self.assertRaises(RuntimeError):
                 exporter.request_json(session, "https://api.hh.ru/vacancies")
 
         self.assertEqual(session.calls, exporter.MAX_RETRIES)
+        self.assertEqual(sleep_mock.call_count, exporter.MAX_RETRIES - 1)
+
+
+class HeadHunterExtractionTests(unittest.TestCase):
+    def test_clean_html_preserves_strong_headings_and_lists(self):
+        html = """
+        <p><strong>Требования:</strong></p>
+        <ul><li>Опыт с Python</li><li>SQL</li></ul>
+        <p><strong>Условия:</strong></p><p>Удаленка</p>
+        """
+
+        text = exporter.clean_html(html)
+
+        self.assertIn("Требования:", text)
+        self.assertIn("- Опыт с Python", text)
+        self.assertIn("Условия:", text)
+
+    def test_extract_section_handles_inline_heading_after_normalization(self):
+        text = "Требования: Python и SQL\nОбязанности:\n- Разработка"
+
+        self.assertEqual(exporter.extract_requirements(text), "Python и SQL")
+
+    def test_extract_requirements_from_realistic_hh_html_variants(self):
+        html = """
+        <div>Мы ожидаем от кандидата:</div>
+        <ul><li>Опыт аналитики от 2 лет</li><li>Знание SQL</li></ul>
+        <p><strong>Будет плюсом:</strong> Python</p>
+        <p><strong>Мы предлагаем:</strong></p><ul><li>ДМС</li></ul>
+        """
+
+        text = exporter.clean_html(html)
+        requirements = exporter.extract_requirements(text)
+
+        self.assertIn("- Опыт аналитики от 2 лет", requirements)
+        self.assertIn("- Знание SQL", requirements)
+        self.assertIn("Python", requirements)
+        self.assertNotIn("ДМС", requirements)
+
+    def test_extract_requirements_falls_back_to_unheaded_list(self):
+        text = exporter.clean_html("<ul><li>Опыт продаж</li><li>Грамотная речь</li></ul><p>Условия:</p><p>Офис</p>")
+
+        self.assertEqual(exporter.extract_requirements(text), "- Опыт продаж\n- Грамотная речь")
+
+    def test_build_row_extracts_sections_and_normalizes_fields(self):
+        search_item = {
+            "id": "1",
+            "name": "Аналитик",
+            "snippet": {"requirement": "<highlighttext>SQL</highlighttext>", "responsibility": "Отчеты"},
+            "employer": {"name": "ACME"},
+        }
+        details = {
+            "id": "1",
+            "description": "<p>Требования:</p><ul><li>SQL</li></ul><p>Обязанности:</p><ul><li>Отчеты</li></ul>",
+            "salary": {"from": 100, "to": 200, "currency": "RUR", "gross": True},
+            "key_skills": [{"name": "SQL"}, {"name": "Python"}],
+            "area": {"name": "Москва"},
+        }
+
+        row = exporter.build_row(search_item, details, "аналитик", "2026-06-09T12:00:00+00:00")
+
+        self.assertEqual(row["vacancy_id"], "1")
+        self.assertEqual(row["salary_from"], 100)
+        self.assertEqual(row["key_skills"], "SQL, Python")
+        self.assertEqual(row["requirements_from_description"], "- SQL")
+        self.assertEqual(row["responsibilities_from_description"], "- Отчеты")
+        self.assertEqual(row["source_query"], "аналитик")
+
+
+class HeadHunterExporterTests(unittest.TestCase):
+    def test_save_outputs_writes_csv_headers_for_empty_rows(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            out = Path(tmpdir) / "vacancies.xlsx"
+
+            with self.assertLogs(level="WARNING") as logs:
+                created = exporter.save_outputs([], out, "csv")
+
+            self.assertEqual(created, [out.with_suffix(".csv")])
+            self.assertIn("только заголовки", "\n".join(logs.output))
+            with created[0].open(encoding="utf-8-sig", newline="") as file_obj:
+                reader = csv.reader(file_obj)
+                self.assertEqual(next(reader), exporter.OUTPUT_COLUMNS)
+
+    def test_save_outputs_writes_both_formats(self):
+        row = {column: "" for column in exporter.OUTPUT_COLUMNS}
+        row["vacancy_id"] = "1"
+        with tempfile.TemporaryDirectory() as tmpdir:
+            out = Path(tmpdir) / "vacancies"
+
+            created = exporter.save_outputs([row], out, "both")
+
+            self.assertEqual(set(created), {out.with_suffix(".xlsx"), out.with_suffix(".csv")})
+            for path in created:
+                self.assertTrue(path.exists())
 
 
 if __name__ == "__main__":

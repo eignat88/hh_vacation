@@ -1,5 +1,6 @@
-requests
-pandas
-openpyxl
-beautifulsoup4
-tqdm
+requests>=2.31
+pandas>=2.0
+openpyxl>=3.1
+beautifulsoup4>=4.12
+tqdm>=4.66
+ruff>=0.8
