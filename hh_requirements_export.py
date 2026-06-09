@@ -45,7 +45,8 @@ MAX_RETRIES = 3
 RETRY_BACKOFF_SECONDS = 2
 HH_USER_AGENT_ENV = "HH_USER_AGENT"
 HH_ACCESS_TOKEN_ENV = "HH_ACCESS_TOKEN"
-DEFAULT_HH_USER_AGENT = "hh-requirements-export/1.0 (set HH_USER_AGENT for contact)"
+DEFAULT_HH_USER_AGENT = "hh-requirements-export/1.0 (set HH_USER_AGENT or --user-agent)"
+USER_AGENT_EMAIL_RE = re.compile(r"[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}", re.IGNORECASE)
 
 OUTPUT_COLUMNS = [
     "vacancy_id",
@@ -141,6 +142,28 @@ def configure_logging(debug: bool) -> None:
 
     root.addHandler(console_handler)
     root.addHandler(file_handler)
+
+
+def validate_user_agent_value(user_agent: str | None) -> str | None:
+    """Return a validation error for HH API User-Agent or None when it looks usable."""
+    resolved_user_agent = (user_agent or "").strip()
+    if not resolved_user_agent:
+        return (
+            "Для запросов к API hh.ru необходимо указать контактный User-Agent: "
+            "передайте --user-agent 'MyApp/1.0 (you@example.com)' "
+            f"или задайте переменную окружения {HH_USER_AGENT_ENV}."
+        )
+    if resolved_user_agent == DEFAULT_HH_USER_AGENT or "set HH_USER_AGENT" in resolved_user_agent:
+        return (
+            "Встроенный User-Agent является только подсказкой и может приводить к 403 Forbidden от hh.ru. "
+            "Укажите собственный контактный User-Agent в формате 'MyApp/1.0 (you@example.com)'."
+        )
+    if not USER_AGENT_EMAIL_RE.search(resolved_user_agent):
+        return (
+            "User-Agent для hh.ru должен содержать контактную почту разработчика, например "
+            "'MyApp/1.0 (you@example.com)'."
+        )
+    return None
 
 
 def create_session(user_agent: str | None = None, access_token: str | None = None) -> Session:
@@ -512,6 +535,11 @@ def complete_interactive_args(args: argparse.Namespace) -> argparse.Namespace:
         entered_out = input(f"Выходной файл (--out) [{default_out}]: ").strip()
         args.out = entered_out or default_out
 
+    if validate_user_agent_value(args.user_agent):
+        args.user_agent = input(
+            "Контактный User-Agent для API hh.ru (--user-agent), например 'MyApp/1.0 (you@example.com)': "
+        ).strip()
+
     return args
 
 
@@ -553,13 +581,17 @@ def parse_args() -> argparse.Namespace:
 
 
 def validate_args(args: argparse.Namespace) -> None:
-    """Validate argument values that should be positive."""
+    """Validate argument values before making HH API requests."""
     if args.pages < 1:
         raise ValueError("--pages должен быть больше 0")
     if args.per_page < 1 or args.per_page > 100:
         raise ValueError("--per-page должен быть от 1 до 100")
     if args.delay < 0:
         raise ValueError("--delay не может быть отрицательным")
+
+    user_agent_error = validate_user_agent_value(args.user_agent)
+    if user_agent_error:
+        raise ValueError(user_agent_error)
 
 
 def main() -> int:

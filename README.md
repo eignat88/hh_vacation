@@ -36,12 +36,15 @@ pip install -r requirements.txt
 ## Быстрый запуск
 
 ```powershell
+$env:HH_USER_AGENT = "hh-requirements-export/1.0 (you@example.com)"
 python hh_requirements_export.py --text "менеджер маркетплейсов" --area 113 --pages 5 --per-page 50 --out output/hh_marketplace_manager.xlsx
 ```
 
 Скрипт автоматически создаст папки `output` и `logs`, если они отсутствуют.
 
-Если API возвращает `403 Forbidden`, укажите контактный User-Agent в формате `ИмяПриложения/версия (email)` и, при необходимости, OAuth-токен:
+API hh.ru требует заголовок `User-Agent`/`HH-User-Agent`; укажите в нём название приложения и контактную почту в формате `ИмяПриложения/версия (email)`. Без контактного User-Agent API может вернуть `403 Forbidden`, поэтому скрипт проверяет это значение до первого запроса.
+
+Если API дополнительно требует авторизацию, передайте OAuth-токен:
 
 ```powershell
 $env:HH_USER_AGENT = "hh-requirements-export/1.0 (you@example.com)"
@@ -160,7 +163,7 @@ logs/hh_parser.log
 | Ошибка | Что делать |
 | --- | --- |
 | `Нет подключения к интернету или api.hh.ru недоступен` | Проверьте интернет и доступность `https://api.hh.ru`. |
-| `403 Client Error: Forbidden` | Укажите `HH_USER_AGENT`/`--user-agent` в формате `ИмяПриложения/версия (email)`. Если в тексте ошибки API есть `oauth`, передайте актуальный токен через `HH_ACCESS_TOKEN` или `--access-token`. В новых логах скрипт выводит детали ответа API и `request_id`, если они пришли от hh.ru. |
+| `403 Client Error: Forbidden` | Укажите реальный контактный `HH_USER_AGENT`/`--user-agent` в формате `ИмяПриложения/версия (email)`, например `hh-requirements-export/1.0 (you@example.com)`. Если в тексте ошибки API есть `oauth`, передайте актуальный токен через `HH_ACCESS_TOKEN` или `--access-token`. В логах скрипт выводит детали ответа API и `request_id`, если они пришли от hh.ru. |
 | `Превышен лимит запросов` | Увеличьте `--delay`, уменьшите `--pages` или повторите запуск позже. |
 | `--per-page должен быть от 1 до 100` | Укажите допустимое значение `--per-page`. |
 | В колонке `requirements_from_description` пусто | Это допустимо: описание вакансии могло не содержать отдельный блок требований. Проверьте `snippet_requirement`, `key_skills` и `full_description_text`. |
@@ -171,7 +174,7 @@ logs/hh_parser.log
 Для короткой проверки можно выполнить:
 
 ```powershell
-python hh_requirements_export.py --text "менеджер маркетплейсов" --area 113 --pages 2 --per-page 20 --out output/test_marketplace.xlsx
+python hh_requirements_export.py --text "менеджер маркетплейсов" --area 113 --pages 2 --per-page 20 --out output/test_marketplace.xlsx --user-agent "hh-requirements-export/1.0 (you@example.com)"
 ```
 
 Ожидаемый результат: файл `output/test_marketplace.xlsx` создан, вакансии загружены, ссылки сохранены, отсутствующие данные не приводят к падению скрипта, в консоли показан итог выполнения.
