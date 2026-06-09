@@ -1,5 +1,7 @@
 import os
 import unittest
+from datetime import datetime, timezone
+from email.utils import format_datetime
 from unittest.mock import patch
 
 import requests
@@ -89,6 +91,24 @@ class HeadHunterRequestTests(unittest.TestCase):
             "Встроенный User-Agent",
             exporter.validate_user_agent_value(exporter.DEFAULT_HH_USER_AGENT) or "",
         )
+
+    def test_parse_retry_after_numeric_seconds(self):
+        self.assertEqual(exporter.parse_retry_after("12", fallback=5), 12)
+
+    def test_parse_retry_after_http_date(self):
+        fixed_now = datetime(2026, 6, 9, 12, 0, 0, tzinfo=timezone.utc)
+        retry_at = datetime(2026, 6, 9, 12, 0, 30, tzinfo=timezone.utc)
+
+        class FixedDateTime:
+            @classmethod
+            def now(cls, tz=None):
+                return fixed_now if tz is None else fixed_now.astimezone(tz)
+
+        with patch.object(exporter, "datetime", FixedDateTime):
+            self.assertEqual(exporter.parse_retry_after(format_datetime(retry_at, usegmt=True), fallback=5), 30)
+
+    def test_parse_retry_after_invalid_value_falls_back(self):
+        self.assertEqual(exporter.parse_retry_after("definitely not a retry date", fallback=7), 7)
 
     def test_request_json_raises_non_retryable_403_with_api_details(self):
         response = DummyResponse(

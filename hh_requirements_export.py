@@ -12,6 +12,7 @@ from __future__ import annotations
 import argparse
 import csv
 import html
+from email.utils import parsedate_to_datetime
 import json
 import logging
 import os
@@ -307,6 +308,35 @@ def raise_detailed_http_error(response: Response) -> None:
         raise requests.exceptions.HTTPError(message, response=response, request=exc.request) from exc
 
 
+def parse_retry_after(value: str | None, fallback: int) -> int:
+    """Parse Retry-After as seconds or HTTP-date, falling back on invalid values."""
+    retry_after = (value or "").strip()
+    if not retry_after:
+        return fallback
+
+    try:
+        seconds = int(retry_after)
+    except ValueError:
+        seconds = None
+    if seconds is not None:
+        if seconds > 0:
+            return seconds
+        logging.debug("Некорректный числовой Retry-After %r; используется fallback %s", value, fallback)
+        return fallback
+
+    try:
+        retry_at = parsedate_to_datetime(retry_after)
+    except (TypeError, ValueError, IndexError, OverflowError) as exc:
+        logging.debug("Не удалось разобрать Retry-After %r: %s; используется fallback %s", value, exc, fallback)
+        return fallback
+
+    if retry_at.tzinfo is None:
+        retry_at = retry_at.replace(tzinfo=timezone.utc)
+
+    delay_seconds = int((retry_at - datetime.now(timezone.utc)).total_seconds())
+    return max(0, delay_seconds)
+
+
 def request_json(session: Session, url: str, params: dict[str, Any] | None = None) -> dict[str, Any]:
     """GET JSON with retries for temporary API/network errors."""
     last_error: Exception | None = None
@@ -318,7 +348,7 @@ def request_json(session: Session, url: str, params: dict[str, Any] | None = Non
             log_api_error_response(response, session)
 
             if response.status_code == 429:
-                retry_after = int(response.headers.get("Retry-After", RETRY_BACKOFF_SECONDS * attempt))
+                retry_after = parse_retry_after(response.headers.get("Retry-After"), RETRY_BACKOFF_SECONDS * attempt)
                 logging.warning("Превышен лимит запросов. Пауза %s сек.", retry_after)
                 time.sleep(retry_after)
                 continue
