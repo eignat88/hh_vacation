@@ -1,0 +1,3 @@
+[submodule "external/hhru-api"]
+	path = external/hhru-api
+	url = https://github.com/hhru/api.git
