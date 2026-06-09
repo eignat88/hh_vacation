@@ -1,3 +1,6 @@
+Set-StrictMode -Version Latest
+$ErrorActionPreference = "Stop"
+
 function Invoke-Git {
     $Command = "git $($Args -join ' ')"
 
