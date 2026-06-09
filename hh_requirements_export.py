@@ -419,13 +419,45 @@ def save_outputs(rows: list[dict[str, Any]], out: Path, output_format: str) -> l
     return created_paths
 
 
+def make_default_output_path(text: str) -> str:
+    """Build a safe default Excel path for interactive runs."""
+    slug = re.sub(r"[^0-9A-Za-zА-Яа-яЁё_-]+", "_", text.strip(), flags=re.UNICODE)
+    slug = slug.strip("_")[:80] or "hh_vacancies"
+    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+    return str(Path("output") / f"{slug}_{timestamp}.xlsx")
+
+
+def complete_interactive_args(args: argparse.Namespace) -> argparse.Namespace:
+    """Prompt for missing required values when the script is run from a terminal."""
+    missing = [name for name in ("text", "out") if not getattr(args, name)]
+    if not missing:
+        return args
+
+    if not sys.stdin.isatty():
+        missing_args = ", ".join(f"--{name}" for name in missing)
+        raise ValueError(f"Не указаны обязательные параметры: {missing_args}")
+
+    print("Интерактивный режим: укажите параметры выгрузки hh.ru.")
+    if not args.text:
+        args.text = input("Поисковый запрос (--text), например 'менеджер маркетплейсов': ").strip()
+    if not args.text:
+        raise ValueError("--text не может быть пустым")
+
+    if not args.out:
+        default_out = make_default_output_path(args.text)
+        entered_out = input(f"Выходной файл (--out) [{default_out}]: ").strip()
+        args.out = entered_out or default_out
+
+    return args
+
+
 def parse_args() -> argparse.Namespace:
     """Parse command-line arguments."""
     parser = argparse.ArgumentParser(
         description="Выгрузка требований из вакансий hh.ru через официальный API в Excel/CSV."
     )
-    parser.add_argument("--text", required=True, help="Поисковый запрос, например: 'менеджер маркетплейсов'.")
-    parser.add_argument("--out", required=True, help="Путь к выходному файлу .xlsx или .csv.")
+    parser.add_argument("--text", help="Поисковый запрос, например: 'менеджер маркетплейсов'.")
+    parser.add_argument("--out", help="Путь к выходному файлу .xlsx или .csv. В интерактивном режиме можно оставить пустым.")
     parser.add_argument("--area", default=DEFAULT_AREA, help="Регион поиска hh.ru. По умолчанию 113 (Россия).")
     parser.add_argument("--pages", type=int, default=DEFAULT_PAGES, help="Количество страниц поиска.")
     parser.add_argument("--per-page", type=int, default=DEFAULT_PER_PAGE, help="Количество вакансий на странице.")
@@ -456,6 +488,7 @@ def main() -> int:
     configure_logging(args.debug)
 
     try:
+        args = complete_interactive_args(args)
         validate_args(args)
     except ValueError as exc:
         logging.error(str(exc))
