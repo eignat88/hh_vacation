@@ -59,6 +59,17 @@ class HeadHunterRequestTests(unittest.TestCase):
         self.assertEqual(session.headers["User-Agent"], "EnvApp/2.0 (env@example.com)")
         self.assertEqual(session.headers["HH-User-Agent"], "EnvApp/2.0 (env@example.com)")
 
+    def test_validate_user_agent_requires_contact_email(self):
+        self.assertIsNone(exporter.validate_user_agent_value("MyApp/1.0 (me@example.com)"))
+        self.assertIn("контактную почту", exporter.validate_user_agent_value("MyApp/1.0") or "")
+
+    def test_validate_user_agent_rejects_missing_or_placeholder(self):
+        self.assertIn("необходимо указать", exporter.validate_user_agent_value(None) or "")
+        self.assertIn(
+            "Встроенный User-Agent",
+            exporter.validate_user_agent_value(exporter.DEFAULT_HH_USER_AGENT) or "",
+        )
+
     def test_request_json_raises_non_retryable_403_with_api_details(self):
         response = DummyResponse(
             status_code=403,
