@@ -38,12 +38,22 @@ if ($LASTEXITCODE -ne 0 -or [string]::IsNullOrWhiteSpace($Upstream)) {
 }
 
 Write-Host "Current branch: $CurrentBranch (upstream: $Upstream)"
+Write-Host "Checking for local changes before updating..."
+$LocalChanges = Invoke-GitOutput status --porcelain
+
+if (-not [string]::IsNullOrWhiteSpace($LocalChanges)) {
+    Write-Error "Before updating, commit, stash, or remove local changes."
+    exit 1
+}
+
+Write-Host "Pulling with rebase and autostash..."
 Invoke-Git pull --rebase --autostash
 
 Write-Host "=== Initializing submodules ===" -ForegroundColor Cyan
 Invoke-Git submodule update --init --recursive
 
 Write-Host "=== Updating official hhru/api submodule ===" -ForegroundColor Cyan
+Write-Warning "Updating the submodule may change the external/hhru-api pointer in the main repository."
 Invoke-Git submodule update --remote --checkout external/hhru-api
 
 Write-Host "=== Git status ===" -ForegroundColor Cyan
