@@ -12,6 +12,7 @@ from __future__ import annotations
 import argparse
 import csv
 import html
+import json
 import logging
 import os
 import re
@@ -46,7 +47,10 @@ RETRY_BACKOFF_SECONDS = 2
 HH_USER_AGENT_ENV = "HH_USER_AGENT"
 HH_ACCESS_TOKEN_ENV = "HH_ACCESS_TOKEN"
 DEFAULT_HH_USER_AGENT = "hh-requirements-export/1.0 (set HH_USER_AGENT or --user-agent)"
-USER_AGENT_EMAIL_RE = re.compile(r"[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}", re.IGNORECASE)
+USER_AGENT_FORMAT_RE = re.compile(
+    r"^[A-Z0-9._-]+/[A-Z0-9._+-]+ \([A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}\)$",
+    re.IGNORECASE,
+)
 
 OUTPUT_COLUMNS = [
     "vacancy_id",
@@ -158,18 +162,24 @@ def validate_user_agent_value(user_agent: str | None) -> str | None:
             "Встроенный User-Agent является только подсказкой и может приводить к 403 Forbidden от hh.ru. "
             "Укажите собственный контактный User-Agent в формате 'MyApp/1.0 (you@example.com)'."
         )
-    if not USER_AGENT_EMAIL_RE.search(resolved_user_agent):
+    if not USER_AGENT_FORMAT_RE.fullmatch(resolved_user_agent):
         return (
-            "User-Agent для hh.ru должен содержать контактную почту разработчика, например "
-            "'MyApp/1.0 (you@example.com)'."
+            "User-Agent для hh.ru должен быть в формате "
+            "'ApplicationName/Version (contact_email)', например 'MyApp/1.0 (you@example.com)'."
         )
     return None
 
 
+def resolve_access_token(access_token: str | None = None) -> str:
+    """Resolve an optional OAuth token without treating blanks as credentials."""
+    token_source = os.getenv(HH_ACCESS_TOKEN_ENV) if access_token is None else access_token
+    return (token_source or "").strip()
+
+
 def create_session(user_agent: str | None = None, access_token: str | None = None) -> Session:
-    """Create a requests session with headers recommended for public API clients."""
+    """Create a requests session for public or optionally authorized HH API calls."""
     resolved_user_agent = (user_agent or os.getenv(HH_USER_AGENT_ENV) or DEFAULT_HH_USER_AGENT).strip()
-    resolved_access_token = (access_token or os.getenv(HH_ACCESS_TOKEN_ENV) or "").strip()
+    resolved_access_token = resolve_access_token(access_token)
 
     session = requests.Session()
     session.headers.update(
@@ -222,6 +232,69 @@ def format_api_error(response: Response) -> str:
     return "; ".join(details)
 
 
+def get_response_body_for_log(response: Response) -> str:
+    """Return the API response body for diagnostics, preserving JSON payloads in tests."""
+    body = response.text.strip()
+    if body:
+        return body
+
+    try:
+        payload = response.json()
+    except ValueError:
+        return ""
+    return json.dumps(payload, ensure_ascii=False)
+
+
+def extract_request_id(response: Response) -> str:
+    """Extract HH request_id from headers or a JSON response body when available."""
+    request_id = response.headers.get("HH-Request-Id") or response.headers.get("X-Request-Id")
+    if request_id:
+        return str(request_id)
+
+    try:
+        payload = response.json()
+    except ValueError:
+        return ""
+    if isinstance(payload, dict) and payload.get("request_id"):
+        return str(payload["request_id"])
+    return ""
+
+
+def redact_headers(headers: dict[str, Any] | requests.structures.CaseInsensitiveDict[str]) -> dict[str, str]:
+    """Return request headers safe for logging without revealing OAuth tokens."""
+    redacted: dict[str, str] = {}
+    for name, value in headers.items():
+        if name.lower() == "authorization":
+            redacted[name] = "Bearer ***" if str(value).strip() else ""
+        else:
+            redacted[name] = str(value)
+    return redacted
+
+
+def sent_headers_for_log(response: Response, session: Session) -> dict[str, str]:
+    """Return the headers that were sent, falling back to session defaults in mocked tests."""
+    request_headers = getattr(getattr(response, "request", None), "headers", None)
+    if request_headers:
+        return redact_headers(request_headers)
+    return redact_headers(session.headers)
+
+
+def log_api_error_response(response: Response, session: Session) -> None:
+    """Log required HH API diagnostics for client/rate-limit errors."""
+    if response.status_code not in {400, 403, 429}:
+        return
+
+    request_id = extract_request_id(response) or "<missing>"
+    logging.error(
+        "Ошибка API hh.ru: HTTP %s; URL: %s; request_id: %s; тело ответа: %s; отправленные заголовки: %s",
+        response.status_code,
+        response.url,
+        request_id,
+        get_response_body_for_log(response),
+        sent_headers_for_log(response, session),
+    )
+
+
 def raise_detailed_http_error(response: Response) -> None:
     """Raise HTTPError with HH API error payload included in the message."""
     try:
@@ -242,6 +315,7 @@ def request_json(session: Session, url: str, params: dict[str, Any] | None = Non
         try:
             logging.debug("GET %s params=%s attempt=%s", url, params, attempt)
             response: Response = session.get(url, params=params, timeout=REQUEST_TIMEOUT)
+            log_api_error_response(response, session)
 
             if response.status_code == 429:
                 retry_after = int(response.headers.get("Retry-After", RETRY_BACKOFF_SECONDS * attempt))

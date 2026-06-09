@@ -32,8 +32,9 @@ class DummyResponse:
 
 
 class DummySession:
-    def __init__(self, response):
+    def __init__(self, response, headers=None):
         self.response = response
+        self.headers = headers or {}
         self.calls = 0
 
     def get(self, *_args, **_kwargs):
@@ -59,9 +60,28 @@ class HeadHunterRequestTests(unittest.TestCase):
         self.assertEqual(session.headers["User-Agent"], "EnvApp/2.0 (env@example.com)")
         self.assertEqual(session.headers["HH-User-Agent"], "EnvApp/2.0 (env@example.com)")
 
-    def test_validate_user_agent_requires_contact_email(self):
+    def test_create_session_adds_authorization_from_environment_token(self):
+        with patch.dict(os.environ, {"HH_ACCESS_TOKEN": "env-token-123"}, clear=False):
+            session = exporter.create_session(
+                user_agent="MyApp/1.0 (me@example.com)",
+                access_token=None,
+            )
+
+        self.assertEqual(session.headers["Authorization"], "Bearer env-token-123")
+
+    def test_create_session_omits_blank_authorization_header(self):
+        with patch.dict(os.environ, {"HH_ACCESS_TOKEN": "   "}, clear=False):
+            session = exporter.create_session(
+                user_agent="MyApp/1.0 (me@example.com)",
+                access_token=None,
+            )
+
+        self.assertNotIn("Authorization", session.headers)
+
+    def test_validate_user_agent_requires_application_version_and_email(self):
         self.assertIsNone(exporter.validate_user_agent_value("MyApp/1.0 (me@example.com)"))
-        self.assertIn("контактную почту", exporter.validate_user_agent_value("MyApp/1.0") or "")
+        self.assertIn("ApplicationName/Version", exporter.validate_user_agent_value("MyApp/1.0") or "")
+        self.assertIn("ApplicationName/Version", exporter.validate_user_agent_value("MyApp (me@example.com)") or "")
 
     def test_validate_user_agent_rejects_missing_or_placeholder(self):
         self.assertIn("необходимо указать", exporter.validate_user_agent_value(None) or "")
@@ -75,14 +95,51 @@ class HeadHunterRequestTests(unittest.TestCase):
             status_code=403,
             payload={"errors": [{"type": "forbidden", "value": "captcha_required"}], "request_id": "rid-1"},
         )
-        session = DummySession(response)
+        session = DummySession(
+            response,
+            headers={
+                "User-Agent": "MyApp/1.0 (me@example.com)",
+                "HH-User-Agent": "MyApp/1.0 (me@example.com)",
+                "Authorization": "Bearer token-123",
+            },
+        )
 
-        with self.assertRaises(requests.exceptions.HTTPError) as ctx:
-            exporter.request_json(session, "https://api.hh.ru/vacancies")
+        with self.assertLogs(level="ERROR") as logs:
+            with self.assertRaises(requests.exceptions.HTTPError) as ctx:
+                exporter.request_json(session, "https://api.hh.ru/vacancies")
 
+        log_output = "\n".join(logs.output)
         self.assertEqual(session.calls, 1)
         self.assertIn("forbidden: captcha_required", str(ctx.exception))
         self.assertIn("request_id=rid-1", str(ctx.exception))
+        self.assertIn("HTTP 403", log_output)
+        self.assertIn("https://api.hh.ru/vacancies", log_output)
+        self.assertIn('"request_id": "rid-1"', log_output)
+        self.assertIn("request_id: rid-1", log_output)
+        self.assertIn("User-Agent", log_output)
+        self.assertIn("Bearer ***", log_output)
+        self.assertNotIn("token-123", log_output)
+
+    def test_log_api_error_response_logs_required_400_and_429_details(self):
+        for status_code in (400, 429):
+            with self.subTest(status_code=status_code):
+                response = DummyResponse(
+                    status_code=status_code,
+                    payload={"description": "bad request", "request_id": f"rid-{status_code}"},
+                    headers={"HH-Request-Id": f"rid-{status_code}"},
+                    text=f"api body {status_code}",
+                )
+                session = DummySession(response, headers={"User-Agent": "MyApp/1.0 (me@example.com)"})
+
+                with self.assertLogs(level="ERROR") as logs:
+                    exporter.log_api_error_response(response, session)
+
+                log_output = "\n".join(logs.output)
+                self.assertIn(f"HTTP {status_code}", log_output)
+                self.assertIn("https://api.hh.ru/vacancies", log_output)
+                self.assertIn(f"api body {status_code}", log_output)
+                self.assertIn(f"request_id: rid-{status_code}", log_output)
+                self.assertIn("User-Agent", log_output)
 
     def test_request_json_retries_server_errors(self):
         response = DummyResponse(status_code=503, payload={"errors": [{"type": "service_unavailable"}]})
