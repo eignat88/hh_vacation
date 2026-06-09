@@ -13,6 +13,7 @@ import argparse
 import csv
 import html
 import logging
+import os
 import re
 import sys
 import time
@@ -42,6 +43,9 @@ DEFAULT_DELAY = 0.3
 REQUEST_TIMEOUT = 20
 MAX_RETRIES = 3
 RETRY_BACKOFF_SECONDS = 2
+HH_USER_AGENT_ENV = "HH_USER_AGENT"
+HH_ACCESS_TOKEN_ENV = "HH_ACCESS_TOKEN"
+DEFAULT_HH_USER_AGENT = "hh-requirements-export/1.0 (set HH_USER_AGENT for contact)"
 
 OUTPUT_COLUMNS = [
     "vacancy_id",
@@ -139,16 +143,72 @@ def configure_logging(debug: bool) -> None:
     root.addHandler(file_handler)
 
 
-def create_session() -> Session:
+def create_session(user_agent: str | None = None, access_token: str | None = None) -> Session:
     """Create a requests session with headers recommended for public API clients."""
+    resolved_user_agent = (user_agent or os.getenv(HH_USER_AGENT_ENV) or DEFAULT_HH_USER_AGENT).strip()
+    resolved_access_token = (access_token or os.getenv(HH_ACCESS_TOKEN_ENV) or "").strip()
+
     session = requests.Session()
     session.headers.update(
         {
-            "User-Agent": "hh-requirements-export/1.0 (+https://api.hh.ru)",
+            "User-Agent": resolved_user_agent,
+            "HH-User-Agent": resolved_user_agent,
             "Accept": "application/json",
+            "Accept-Language": "ru-RU,ru;q=0.9,en;q=0.8",
         }
     )
+    if resolved_access_token:
+        session.headers["Authorization"] = f"Bearer {resolved_access_token}"
     return session
+
+
+def format_api_error(response: Response) -> str:
+    """Build a compact, human-readable error detail from an HH API response."""
+    details: list[str] = []
+    request_id = response.headers.get("HH-Request-Id") or response.headers.get("X-Request-Id")
+
+    try:
+        payload = response.json()
+    except ValueError:
+        payload = None
+
+    if isinstance(payload, dict):
+        errors = payload.get("errors")
+        if isinstance(errors, list):
+            for error in errors:
+                if not isinstance(error, dict):
+                    continue
+                parts = [str(error.get("type") or "unknown")]
+                if error.get("value"):
+                    parts.append(str(error["value"]))
+                if error.get("description"):
+                    parts.append(str(error["description"]))
+                details.append(": ".join(parts))
+        if payload.get("description"):
+            details.append(str(payload["description"]))
+        if payload.get("request_id"):
+            request_id = str(payload["request_id"])
+    else:
+        body_preview = response.text.strip()[:300]
+        if body_preview:
+            details.append(body_preview)
+
+    if request_id:
+        details.append(f"request_id={request_id}")
+
+    return "; ".join(details)
+
+
+def raise_detailed_http_error(response: Response) -> None:
+    """Raise HTTPError with HH API error payload included in the message."""
+    try:
+        response.raise_for_status()
+    except requests.exceptions.HTTPError as exc:
+        api_error = format_api_error(response)
+        message = str(exc)
+        if api_error:
+            message = f"{message}; API response: {api_error}"
+        raise requests.exceptions.HTTPError(message, response=response, request=exc.request) from exc
 
 
 def request_json(session: Session, url: str, params: dict[str, Any] | None = None) -> dict[str, Any]:
@@ -176,14 +236,18 @@ def request_json(session: Session, url: str, params: dict[str, Any] | None = Non
                 time.sleep(RETRY_BACKOFF_SECONDS * attempt)
                 continue
 
-            if response.status_code in {403, 404, 410}:
-                response.raise_for_status()
-
-            response.raise_for_status()
+            raise_detailed_http_error(response)
             return response.json()
         except requests.exceptions.JSONDecodeError as exc:
             last_error = exc
             logging.warning("Некорректный JSON: %s", exc)
+            time.sleep(RETRY_BACKOFF_SECONDS * attempt)
+        except requests.exceptions.HTTPError as exc:
+            response = exc.response
+            if response is not None and 400 <= response.status_code < 500 and response.status_code != 429:
+                raise
+            last_error = exc
+            logging.warning("Ошибка запроса: %s", exc)
             time.sleep(RETRY_BACKOFF_SECONDS * attempt)
         except requests.exceptions.RequestException as exc:
             last_error = exc
@@ -468,6 +532,22 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--experience", help="Требуемый опыт в формате справочника hh.ru, например between1And3.")
     parser.add_argument("--output-format", choices=["xlsx", "csv", "both"], default="xlsx", help="Формат выгрузки.")
     parser.add_argument("--delay", type=float, default=DEFAULT_DELAY, help="Пауза между запросами к API в секундах.")
+    parser.add_argument(
+        "--user-agent",
+        default=os.getenv(HH_USER_AGENT_ENV),
+        help=(
+            "Значение для заголовков User-Agent и HH-User-Agent. "
+            f"Можно задать через переменную окружения {HH_USER_AGENT_ENV}."
+        ),
+    )
+    parser.add_argument(
+        "--access-token",
+        default=os.getenv(HH_ACCESS_TOKEN_ENV),
+        help=(
+            "OAuth access token для запросов с авторизацией. "
+            f"Можно задать через переменную окружения {HH_ACCESS_TOKEN_ENV}."
+        ),
+    )
     parser.add_argument("--debug", action="store_true", help="Подробное логирование.")
     return parser.parse_args()
 
@@ -497,9 +577,12 @@ def main() -> int:
     logging.info("Старт выгрузки")
     logging.info("Запрос: %s", args.text)
     logging.info("Регион: %s", args.area)
-    logging.debug("Параметры запуска: %s", vars(args))
+    args_for_log = vars(args).copy()
+    if args_for_log.get("access_token"):
+        args_for_log["access_token"] = "***"
+    logging.debug("Параметры запуска: %s", args_for_log)
 
-    session = create_session()
+    session = create_session(user_agent=args.user_agent, access_token=args.access_token)
     loaded_at = datetime.now(timezone.utc).astimezone().isoformat(timespec="seconds")
     rows: list[dict[str, Any]] = []
     skipped = 0

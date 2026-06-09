@@ -12,7 +12,8 @@ Python-скрипт для выгрузки вакансий с hh.ru по по�
 - извлечение блоков `requirements_from_description`, `responsibilities_from_description`, `conditions_from_description`;
 - сохранение результата в `.xlsx`, `.csv` или оба формата;
 - логирование в консоль и файл `logs/hh_parser.log`;
-- устойчивость к временным ошибкам API и пропуск проблемных вакансий без остановки всей выгрузки.
+- устойчивость к временным ошибкам API и пропуск проблемных вакансий без остановки всей выгрузки;
+- передача корректных заголовков `User-Agent` и `HH-User-Agent`, а также опционального OAuth-токена для запросов к API.
 
 ## Установка
 
@@ -40,6 +41,15 @@ python hh_requirements_export.py --text "менеджер маркетплейс
 
 Скрипт автоматически создаст папки `output` и `logs`, если они отсутствуют.
 
+Если API возвращает `403 Forbidden`, укажите контактный User-Agent в формате `ИмяПриложения/версия (email)` и, при необходимости, OAuth-токен:
+
+```powershell
+$env:HH_USER_AGENT = "hh-requirements-export/1.0 (you@example.com)"
+$env:HH_ACCESS_TOKEN = "ваш_access_token"
+python hh_requirements_export.py --text "менеджер маркетплейсов" --area 113 --pages 2 --per-page 20 --out output/hh_marketplace_manager.xlsx
+```
+
+Эти же значения можно передать аргументами `--user-agent` и `--access-token`.
 
 ## Интерактивный запуск без параметров
 
@@ -93,6 +103,8 @@ python hh_requirements_export.py --text "аналитик маркетплейс
 | `--experience` | нет | не задано | Опыт работы в формате справочника hh.ru, например `between1And3`. |
 | `--output-format` | нет | `xlsx` | Формат выгрузки: `xlsx`, `csv` или `both`. |
 | `--delay` | нет | `0.3` | Пауза между запросами к API в секундах. |
+| `--user-agent` | нет | переменная `HH_USER_AGENT` или встроенное значение | Значение для заголовков `User-Agent` и `HH-User-Agent`. Рекомендуемый формат: `ИмяПриложения/версия (email)`. |
+| `--access-token` | нет | переменная `HH_ACCESS_TOKEN` | OAuth access token для авторизованных запросов, если API требует авторизацию. |
 | `--debug` | нет | `False` | Подробное логирование параметров и HTTP-запросов. |
 
 ## Колонки выходного файла
@@ -148,6 +160,7 @@ logs/hh_parser.log
 | Ошибка | Что делать |
 | --- | --- |
 | `Нет подключения к интернету или api.hh.ru недоступен` | Проверьте интернет и доступность `https://api.hh.ru`. |
+| `403 Client Error: Forbidden` | Укажите `HH_USER_AGENT`/`--user-agent` в формате `ИмяПриложения/версия (email)`. Если в тексте ошибки API есть `oauth`, передайте актуальный токен через `HH_ACCESS_TOKEN` или `--access-token`. В новых логах скрипт выводит детали ответа API и `request_id`, если они пришли от hh.ru. |
 | `Превышен лимит запросов` | Увеличьте `--delay`, уменьшите `--pages` или повторите запуск позже. |
 | `--per-page должен быть от 1 до 100` | Укажите допустимое значение `--per-page`. |
 | В колонке `requirements_from_description` пусто | Это допустимо: описание вакансии могло не содержать отдельный блок требований. Проверьте `snippet_requirement`, `key_skills` и `full_description_text`. |
